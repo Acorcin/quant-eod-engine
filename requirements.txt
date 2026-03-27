@@ -1,6 +1,9 @@
 # Quant EOD Engine — Python Dependencies
 # Install: pip install -r requirements.txt
 
+# Config
+python-dotenv>=1.0.0
+
 # Database
 psycopg2-binary==2.9.9
 

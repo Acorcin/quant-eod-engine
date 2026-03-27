@@ -1,47 +1,41 @@
 """
 Quant EOD Engine — Configuration
-All secrets loaded from environment variables or Docker secrets.
+All secrets loaded from environment variables (.env file).
 """
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
-
-def _read_secret(env_var: str, secret_file_var: str | None = None, default: str = "") -> str:
-    """Read a secret from env var, Docker secret file, or default."""
-    value = os.environ.get(env_var, "")
-    if value:
-        return value
-    if secret_file_var:
-        path = os.environ.get(secret_file_var, "")
-        if path and Path(path).exists():
-            return Path(path).read_text().strip()
-    return default
+# Load .env file if present (Docker passes env vars directly)
+env_path = Path(__file__).resolve().parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
 
 
 # ─── OANDA ────────────────────────────────────────────────
-OANDA_API_TOKEN = _read_secret("OANDA_API_TOKEN", "OANDA_TOKEN_FILE")
-OANDA_ACCOUNT_ID = _read_secret("OANDA_ACCOUNT_ID", "OANDA_ACCOUNT_ID_FILE")
+OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "")
+OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
 OANDA_BASE_URL = os.environ.get("OANDA_BASE_URL", "https://api-fxpractice.oanda.com")
 # Practice: https://api-fxpractice.oanda.com
 # Live:     https://api-fxtrade.oanda.com
 
 # ─── FRED ─────────────────────────────────────────────────
-FRED_API_KEY = _read_secret("FRED_API_KEY", "FRED_API_KEY_FILE")
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
 # ─── Perplexity ───────────────────────────────────────────
-PERPLEXITY_API_KEY = _read_secret("PERPLEXITY_API_KEY", "PERPLEXITY_API_KEY_FILE")
+PERPLEXITY_API_KEY = os.environ.get("PERPLEXITY_API_KEY", "")
 PERPLEXITY_MODEL = os.environ.get("PERPLEXITY_MODEL", "sonar-pro")
 PERPLEXITY_BASE_URL = "https://api.perplexity.ai"
 
 # ─── Discord ──────────────────────────────────────────────
-DISCORD_WEBHOOK_URL = _read_secret("DISCORD_WEBHOOK_URL", "DISCORD_WEBHOOK_URL_FILE")
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 # ─── PostgreSQL ───────────────────────────────────────────
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = int(os.environ.get("DB_PORT", "5432"))
 DB_NAME = os.environ.get("DB_NAME", "quant_eod")
 DB_USER = os.environ.get("DB_USER", "postgres")
-DB_PASSWORD = _read_secret("DB_PASSWORD", "DB_PASSWORD_FILE", "postgres")
+DB_PASSWORD = os.environ.get("DB_PASSWORD", "postgres")
 
 DATABASE_URL = (
     f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"

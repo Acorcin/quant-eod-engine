@@ -5,17 +5,16 @@ services:
     image: postgres:16-alpine
     container_name: quant_postgres
     restart: unless-stopped
+    env_file: .env
     environment:
-      POSTGRES_DB: quant_eod
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: ${DB_NAME:-quant_eod}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
     ports:
       - "5432:5432"
-    secrets:
-      - db_password
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d quant_eod"]
       interval: 10s
@@ -27,47 +26,17 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: quant_engine
-    restart: "no"  # runs via cron, not always-on
+    restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
+    env_file: .env
     environment:
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: quant_eod
-      DB_USER: postgres
-      DB_PASSWORD_FILE: /run/secrets/db_password
-      OANDA_TOKEN_FILE: /run/secrets/oanda_token
-      OANDA_ACCOUNT_ID_FILE: /run/secrets/oanda_account_id
-      FRED_API_KEY_FILE: /run/secrets/fred_key
-      PERPLEXITY_API_KEY_FILE: /run/secrets/perplexity_key
-      DISCORD_WEBHOOK_URL_FILE: /run/secrets/discord_webhook
-      OANDA_BASE_URL: https://api-fxpractice.oanda.com
       LOG_DIR: /app/logs
-      LOG_LEVEL: INFO
     volumes:
       - ./logs:/app/logs
-    secrets:
-      - db_password
-      - oanda_token
-      - oanda_account_id
-      - fred_key
-      - perplexity_key
-      - discord_webhook
-
-secrets:
-  db_password:
-    file: ./secrets/db_password.txt
-  oanda_token:
-    file: ./secrets/oanda_token.txt
-  oanda_account_id:
-    file: ./secrets/oanda_account_id.txt
-  fred_key:
-    file: ./secrets/fred_key.txt
-  perplexity_key:
-    file: ./secrets/perplexity_key.txt
-  discord_webhook:
-    file: ./secrets/discord_webhook.txt
 
 volumes:
   pgdata:
