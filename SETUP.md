@@ -2,17 +2,6 @@
 
 ---
 
-## Credentials Status
-
-| Service | Status |
-|---|---|
-| OANDA Token + Account ID | Done |
-| FRED API Key | Done |
-| Perplexity API Key | Skipped (fallback to neutral) |
-| Discord Webhook | Done |
-
----
-
 ## Deploy on VPS
 
 ### 1. Clone the repo
@@ -28,24 +17,7 @@ cd quant-eod-engine
 cp .env.example .env
 ```
 
-Edit `.env` with your actual values:
-
-```env
-OANDA_API_TOKEN=e5e5522d0c9f17de2a2053586c5a4a6c-6f956b3635f26db49d447807d1ae46ca
-OANDA_ACCOUNT_ID=101-001-38906191-001
-OANDA_BASE_URL=https://api-fxpractice.oanda.com
-FRED_API_KEY=7b419f977588746a5cac272d39e03662
-PERPLEXITY_API_KEY=
-PERPLEXITY_MODEL=sonar-pro
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/1486906028296769587/dA_L8drTldVFqfbOZrR0weIepjt4kTgvFpakoQCwyhn0-G36-LMaJm51e93nX44AwH82
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=quant_eod
-DB_USER=postgres
-DB_PASSWORD=Qu4nt_E0D_2026!
-LOG_DIR=./logs
-LOG_LEVEL=INFO
-```
+Edit `.env` with your actual API keys and credentials. See `.env.example` for the required variables.
 
 Lock it down:
 ```bash
@@ -81,5 +53,5 @@ crontab -e
 
 1. **German 2Y Yield** — FRED doesn't carry it. System runs on US 2Y alone.
 2. **Economic Calendar** — Placeholder. Perplexity AI partially covers it (once enabled).
-3. **OANDA Sentiment** — Endpoint may be deprecated. Fallback coded.
-4. **Perplexity AI** — Skipped for now. Fallback: neutral score, 0.1 confidence.
+3. **OANDA Sentiment** — Endpoint deprecated (403). Fallback to neutral coded.
+4. **Perplexity AI** — Add key when ready. Fallback: neutral score, 0.1 confidence.
