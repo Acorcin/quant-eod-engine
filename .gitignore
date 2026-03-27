@@ -15,6 +15,10 @@ build/
 logs/
 *.log
 
+# Model artifacts (generated at runtime)
+model_artifacts/
+*.pkl
+
 # IDE
 .vscode/
 .idea/

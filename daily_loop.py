@@ -2,21 +2,26 @@
 """
 Quant EOD Engine — Daily Loop Orchestrator
 
-This is the master script that runs the entire Phase 1 data collection pipeline.
-Designed to be triggered by cron at 4:30 PM EST, Monday–Friday.
-
-Cron entry (UTC — 4:30 PM EST = 20:30 UTC during EDT, 21:30 during EST):
-  30 20 * * 1-5  cd /path/to/quant-eod-engine && python daily_loop.py
+Master script: data collection + prediction pipeline.
+Triggered by cron at 4:30 PM EST, Monday–Friday.
 
 Pipeline steps:
-  1. Pull OANDA bars (daily + 4H) for all instruments
-  2. Pull FRED yield data
-  3. Pull OANDA sentiment/position ratios
-  4. Pull swap/financing rates
-  5. Pull economic calendar
-  6. Run Perplexity AI sentiment analysis
-  7. Assemble and store daily snapshot
-  8. Log pipeline run status
+  Phase 1 (Data Collection):
+    1. Pull OANDA bars (daily + 4H)
+    2. Pull FRED yield data
+    3. Pull OANDA sentiment/position ratios
+    4. Pull swap/financing rates
+    5. Pull economic calendar
+    6. Run Perplexity AI sentiment analysis
+  Phase 2 (Prediction):
+    7. HMM regime detection
+    8. Generate Tier 1 + Tier 2 signals
+    9. Assemble feature vector
+   10. Meta-model prediction (XGBoost)
+  Finalize:
+   11. Assemble daily snapshot
+   12. Send Discord notification
+   13. Log pipeline run
 """
 import sys
 import os
@@ -36,6 +41,15 @@ from fetchers.swap_rates import fetch_and_store_all as fetch_swaps
 from fetchers.calendar import fetch_and_store as fetch_calendar
 from fetchers.perplexity_sentiment import fetch_and_store as fetch_ai_sentiment
 from fetchers.discord_notify import send_signal, send_error_alert
+
+# Phase 2 imports
+from features.technical import compute_all_features
+from features.vector import assemble_feature_vector, store_feature_vector
+from models.hmm_regime import RegimeDetector
+from signals.tier1 import generate_all_tier1
+from signals.tier2 import generate_all_tier2
+from signals.composite import compute_composite, store_signals
+from models.meta_model import MetaModel
 
 # ─── Logging Setup ────────────────────────────────────────
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -212,13 +226,145 @@ def main():
         ai_result = {"error": str(e)}
         errors["ai_sentiment"] = str(e)
 
-    # Step 7: Assemble Snapshot
-    logger.info("─── Step 7: Assembling daily snapshot ───")
+    # ═══════════════════════════════════════════════════════
+    # PHASE 2: PREDICTION ENGINE
+    # ═══════════════════════════════════════════════════════
+
+    regime_result = {}
+    technical_result = {}
+    tier1_signals = []
+    tier2_signals = []
+    composite_result = {}
+    feature_vector = {}
+    prediction_result = {}
+
+    # Step 7: Compute Technical Indicators
+    logger.info("─── Step 7: Computing technical indicators ───")
+    try:
+        from models.database import fetch_all as db_fetch_all
+        import pandas as pd
+
+        bars_rows = db_fetch_all(
+            """SELECT bar_time, open, high, low, close, volume
+               FROM bars WHERE instrument = %s AND granularity = 'D' AND complete = TRUE
+               ORDER BY bar_time ASC""",
+            (PRIMARY_INSTRUMENT,),
+        )
+        if bars_rows:
+            for r in bars_rows:
+                for col in ['open', 'high', 'low', 'close']:
+                    r[col] = float(r[col])
+                r['volume'] = int(r['volume'])
+            bars_df = pd.DataFrame(bars_rows)
+            technical_result = compute_all_features(bars_df)
+            steps["technical"] = True
+            logger.info(f"Technical: ATR={technical_result.get('atr_14')}, RSI={technical_result.get('rsi_14')}")
+        else:
+            logger.warning("No daily bars in DB for technical indicators")
+    except Exception as e:
+        logger.error(f"Technical indicators failed: {e}")
+        errors["technical"] = str(e)
+
+    # Step 8: HMM Regime Detection
+    logger.info("─── Step 8: HMM regime detection ───")
+    try:
+        detector = RegimeDetector()
+        # Try to load existing model; fit if not available
+        try:
+            detector._load_model()
+            if detector.model is None:
+                raise FileNotFoundError("No model file")
+        except Exception:
+            logger.info("No HMM model found — fitting on available data...")
+            detector.fit(PRIMARY_INSTRUMENT)
+
+        regime_result = detector.predict_regime(PRIMARY_INSTRUMENT)
+        detector.store_regime(today, PRIMARY_INSTRUMENT, regime_result)
+        steps["regime"] = True
+        logger.info(f"Regime: {regime_result.get('state_label')} (conf={regime_result.get('confidence')})")
+    except Exception as e:
+        logger.error(f"Regime detection failed: {e}")
+        regime_result = {"state_id": 1, "state_label": "high_vol_choppy", "confidence": 0.33, "days_in_regime": 0}
+        errors["regime"] = str(e)
+
+    # Step 9: Generate Tier 1 + Tier 2 Signals
+    logger.info("─── Step 9: Generating signals ───")
+    try:
+        tier1_signals = generate_all_tier1(
+            today, PRIMARY_INSTRUMENT, regime_result.get("state_id", 1), technical_result
+        )
+
+        # Determine proposed direction from Tier 1 for Tier 2 confirmation
+        composite_result = compute_composite(tier1_signals, [])
+        proposed_dir = composite_result["composite_direction"]
+
+        tier2_signals = generate_all_tier2(
+            today, PRIMARY_INSTRUMENT, technical_result, proposed_dir
+        )
+
+        # Recompute composite with Tier 2
+        composite_result = compute_composite(tier1_signals, tier2_signals)
+
+        # Store all signals
+        store_signals(today, PRIMARY_INSTRUMENT, tier1_signals, tier2_signals)
+        steps["signals"] = True
+        logger.info(f"Composite: {composite_result['composite_direction']} (strength={composite_result['composite_strength']})")
+    except Exception as e:
+        logger.error(f"Signal generation failed: {e}")
+        errors["signals"] = str(e)
+
+    # Step 10: Assemble Feature Vector
+    logger.info("─── Step 10: Assembling feature vector ───")
+    try:
+        feature_vector = assemble_feature_vector(
+            today, PRIMARY_INSTRUMENT, technical_result, regime_result, composite_result
+        )
+        store_feature_vector(today, PRIMARY_INSTRUMENT, feature_vector)
+        steps["feature_vector"] = True
+        logger.info(f"Feature vector: {len(feature_vector)} features assembled")
+    except Exception as e:
+        logger.error(f"Feature vector assembly failed: {e}")
+        errors["feature_vector"] = str(e)
+
+    # Step 11: Meta-Model Prediction
+    logger.info("─── Step 11: Meta-model prediction ───")
+    try:
+        meta = MetaModel()
+        prediction_result = meta.predict(feature_vector)
+        meta.store_prediction(
+            today, PRIMARY_INSTRUMENT, prediction_result,
+            regime_result.get("state_id", 1),
+            composite_result.get("composite_strength", 0.0),
+        )
+        steps["prediction"] = True
+        logger.info(
+            f"Prediction: {prediction_result['direction']} "
+            f"(prob={prediction_result['probability']}, size={prediction_result['size_multiplier']}x)"
+        )
+    except Exception as e:
+        logger.error(f"Meta-model prediction failed: {e}")
+        errors["prediction"] = str(e)
+
+    # ═══════════════════════════════════════════════════════
+    # FINALIZE
+    # ═══════════════════════════════════════════════════════
+
+    # Step 12: Assemble Snapshot
+    logger.info("─── Step 12: Assembling daily snapshot ───")
     try:
         snapshot = assemble_daily_snapshot(
             bars_result, yields_result, sentiment_result,
             swaps_result, calendar_result, ai_result,
         )
+        # Enrich snapshot with Phase 2 data
+        snapshot["regime"] = regime_result
+        snapshot["signals"] = {
+            "tier1": [{"detector": s["detector"], "direction": s["direction"], "strength": s["strength"]} for s in tier1_signals],
+            "tier2": [{"detector": s["detector"], "confirmed": s.get("confirmed", False)} for s in tier2_signals],
+            "composite": composite_result,
+        }
+        snapshot["prediction"] = prediction_result
+        snapshot["technical"] = {k: v for k, v in technical_result.items() if not k.startswith("is_")}
         store_snapshot(snapshot)
         steps["snapshot"] = True
     except Exception as e:
@@ -228,7 +374,7 @@ def main():
     # Determine overall status
     if not errors:
         status = "success"
-    elif len(errors) < 3:
+    elif len(errors) < 4:
         status = "partial"
     else:
         status = "failed"
@@ -236,8 +382,8 @@ def main():
     # Log the run
     log_pipeline_run(today, started_at, status, steps, errors)
 
-    # Step 8: Send Discord notification
-    logger.info("─── Step 8: Sending Discord notification ───")
+    # Step 13: Send Discord notification
+    logger.info("─── Step 13: Sending Discord notification ───")
     try:
         if 'snapshot' in locals() and snapshot:
             sent = send_signal(snapshot, status)

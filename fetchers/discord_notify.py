@@ -104,22 +104,68 @@ def _build_embed(snapshot: dict, status: str) -> dict:
         if not key.endswith("_error"):
             bar_lines.append(f"`{key}`: {val} bars")
 
+    # Phase 2 data
+    regime = snapshot.get("regime", {})
+    regime_label = regime.get("state_label", "unknown")
+    regime_conf = regime.get("confidence", 0)
+    regime_days = regime.get("days_in_regime", 0)
+
+    prediction = snapshot.get("prediction", {})
+    pred_dir = prediction.get("direction", "flat")
+    pred_prob = prediction.get("probability", 0.5)
+    pred_size = prediction.get("size_multiplier", 0)
+
+    signals_data = snapshot.get("signals", {})
+    composite = signals_data.get("composite", {})
+    comp_dir = composite.get("composite_direction", "flat")
+    comp_strength = composite.get("composite_strength", 0)
+
+    # Prediction direction emoji
+    if pred_dir == "long":
+        pred_icon = "\U0001f7e2 LONG"   # Green
+    elif pred_dir == "short":
+        pred_icon = "\U0001f534 SHORT"  # Red
+    else:
+        pred_icon = "\u26aa FLAT"
+
+    # Regime emoji
+    regime_icons = {
+        "low_vol_trend": "\U0001f4c8",
+        "high_vol_choppy": "\U0001f300",
+        "high_vol_crash": "\u26a1",
+    }
+    regime_icon = regime_icons.get(regime_label, "\u2753")
+
     # Build embed
     embed = {
-        "title": f"{status_icon} EOD Signal — {today}",
+        "title": f"{status_icon} EOD Signal \u2014 {today}",
         "color": 0x00ff88 if status == "success" else (0xffaa00 if status == "partial" else 0xff4444),
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "footer": {"text": "Quant EOD Engine • Phase 1"},
+        "footer": {"text": "Quant EOD Engine \u2022 Phase 2"},
         "fields": [
+            {
+                "name": "\U0001f3af Meta-Model Prediction",
+                "value": (
+                    f"**{pred_icon} EUR/USD**\n"
+                    f"Probability: `{pred_prob:.1%}` | Size: `{pred_size}x`\n"
+                    f"Composite: `{comp_dir}` (strength `{comp_strength:.3f}`)"
+                ),
+                "inline": False,
+            },
+            {
+                "name": f"{regime_icon} Regime",
+                "value": f"`{regime_label}` (conf `{regime_conf:.3f}`)\nDays in regime: `{regime_days}`",
+                "inline": True,
+            },
             {
                 "name": "\U0001f3af Macro Sentiment",
                 "value": (
                     f"**{direction}**\n"
                     f"Score: `{ai_score:.3f}` | Confidence: `{ai_confidence:.3f}`\n"
                     f"Driver: `{ai_driver}`"
-                    + (f"\n\u26a0\ufe0f *Fallback used — AI unavailable*" if fallback else "")
+                    + (f"\n\u26a0\ufe0f *Fallback \u2014 AI unavailable*" if fallback else "")
                 ),
-                "inline": False,
+                "inline": True,
             },
             {
                 "name": "\U0001f3e6 Central Banks",
@@ -135,16 +181,6 @@ def _build_embed(snapshot: dict, status: str) -> dict:
                 "name": "\U0001f4f0 Key Events",
                 "value": events_text,
                 "inline": False,
-            },
-            {
-                "name": "\U0001f4ac Rationale",
-                "value": ai_rationale[:500],
-                "inline": False,
-            },
-            {
-                "name": "\U0001f4ca Data Collected",
-                "value": "\n".join(bar_lines) if bar_lines else "No bar data",
-                "inline": True,
             },
             {
                 "name": "\U0001f6e0\ufe0f Pipeline",

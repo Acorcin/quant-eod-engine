@@ -70,17 +70,23 @@ def fetch_one(query: str, params: tuple = None) -> dict | None:
 
 
 def init_schema():
-    """Initialize the database schema from sql/schema.sql."""
+    """Initialize the database schema from all sql/*.sql files."""
     import os
-    schema_path = os.path.join(os.path.dirname(__file__), "..", "sql", "schema.sql")
-    with open(schema_path) as f:
-        sql = f.read()
+    import glob
+
+    sql_dir = os.path.join(os.path.dirname(__file__), "..", "sql")
+    schema_files = sorted(glob.glob(os.path.join(sql_dir, "schema*.sql")))
+
     conn = get_connection()
     try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
+        for schema_path in schema_files:
+            with open(schema_path) as f:
+                sql = f.read()
+            with conn.cursor() as cur:
+                cur.execute(sql)
+            logger.info(f"Loaded schema: {os.path.basename(schema_path)}")
         conn.commit()
-        logger.info("Database schema initialized successfully")
+        logger.info("All database schemas initialized successfully")
     except Exception as e:
         conn.rollback()
         logger.error(f"Schema init error: {e}")
