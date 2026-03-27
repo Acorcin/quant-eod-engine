@@ -107,6 +107,21 @@ def assemble_feature_vector(
 
 def store_feature_vector(run_date: date, instrument: str, vector: dict):
     """Store the feature vector in the database."""
+    # Ensure all values are JSON-serializable (Decimal → float)
+    clean = {}
+    for k, v in vector.items():
+        if hasattr(v, 'as_integer_ratio'):  # Decimal or float-like
+            clean[k] = float(v)
+        elif isinstance(v, bool):
+            clean[k] = v
+        elif isinstance(v, int):
+            clean[k] = v
+        else:
+            try:
+                clean[k] = float(v) if v is not None else 0.0
+            except (TypeError, ValueError):
+                clean[k] = 0.0
+
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -116,7 +131,7 @@ def store_feature_vector(run_date: date, instrument: str, vector: dict):
                 ON CONFLICT (date, instrument) DO UPDATE SET
                     features = EXCLUDED.features,
                     created_at = NOW()
-            """, (str(run_date), instrument, json.dumps(vector)))
+            """, (str(run_date), instrument, json.dumps(clean)))
         conn.commit()
         logger.info(f"Stored feature vector for {instrument} on {run_date}")
     except Exception as e:
