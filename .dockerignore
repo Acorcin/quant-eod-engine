@@ -1,0 +1,10 @@
+secrets/
+.env
+.env.*
+logs/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+README.md
+SETUP.md

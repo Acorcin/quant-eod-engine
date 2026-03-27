@@ -1,0 +1,21 @@
+# Quant EOD Engine — Python Dependencies
+# Install: pip install -r requirements.txt
+
+# Database
+psycopg2-binary==2.9.9
+
+# OANDA API (raw requests — no wrapper needed, but keep for reference)
+requests>=2.31.0
+
+# FRED API
+fredapi==0.5.2
+
+# Data / Math (needed for Phase 2, install now)
+pandas>=2.1.0
+numpy>=1.25.0
+
+# Perplexity API (raw requests, no SDK needed)
+# requests is already listed above
+
+# Logging
+python-json-logger>=2.0.0
