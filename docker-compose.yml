@@ -12,6 +12,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
       - ./sql/schema_phase2.sql:/docker-entrypoint-initdb.d/02-schema-phase2.sql
+      - ./sql/schema_migration_yield_spread.sql:/docker-entrypoint-initdb.d/03-migration-yield-spread.sql
     ports:
       - "5432:5432"
     healthcheck:

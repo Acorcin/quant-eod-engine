@@ -9,6 +9,7 @@ import json
 import logging
 from datetime import date
 from models.database import get_connection, fetch_one
+from config.settings import SENTIMENT_EXTREME_HIGH, SENTIMENT_EXTREME_LOW
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,16 @@ def assemble_feature_vector(
 
         # ─── Macro (from FRED) ───
         "yield_spread_bps": macro.get("yield_spread_bps", 0.0),
-        "yield_spread_change_5d": macro.get("us_2y_change_5d_bps", 0.0),
-        "yield_spread_change_20d": macro.get("us_2y_change_20d_bps", 0.0),
+        "yield_spread_change_5d": float(
+            macro.get("spread_change_5d_bps")
+            if macro.get("spread_change_5d_bps") is not None
+            else (macro.get("us_2y_change_5d_bps") or 0.0)
+        ),
+        "yield_spread_change_20d": float(
+            macro.get("spread_change_20d_bps")
+            if macro.get("spread_change_20d_bps") is not None
+            else (macro.get("us_2y_change_20d_bps") or 0.0)
+        ),
 
         # ─── Sentiment (from OANDA) ───
         "sentiment_pct_long": sentiment.get("pct_long", 0.5),
@@ -143,8 +152,8 @@ def store_feature_vector(run_date: date, instrument: str, vector: dict):
 
 
 def _is_sentiment_extreme(pct_long: float) -> bool:
-    """Check if sentiment is at an extreme (>72% or <28% long)."""
-    return pct_long > 0.72 or pct_long < 0.28
+    """Check if sentiment is at an extreme (configurable thresholds)."""
+    return pct_long > SENTIMENT_EXTREME_HIGH or pct_long < SENTIMENT_EXTREME_LOW
 
 
 def _get_macro_data(run_date: date) -> dict:

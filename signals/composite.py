@@ -27,24 +27,28 @@ def compute_composite(tier1_signals: list[dict], tier2_signals: list[dict]) -> d
     # Tally Tier 1 directional votes
     long_score = 0.0
     short_score = 0.0
-    active_count = 0
+    long_count = 0
+    short_count = 0
     eod_reversal = 0
     event_surprise = 0.0
 
     for sig in tier1_signals:
         if sig["direction"] == "long":
             long_score += sig["strength"]
-            active_count += 1
+            long_count += 1
         elif sig["direction"] == "short":
             short_score += sig["strength"]
-            active_count += 1
+            short_count += 1
 
         if sig["detector"] == "eod_event_reversal":
             meta = sig.get("metadata", {})
             eod_reversal = 1 if meta.get("triggered", False) else 0
-            # Could parse magnitude from event data — placeholder for now
             if eod_reversal:
-                event_surprise = sig["strength"]
+                event_surprise = float(meta.get("net_usd_score", sig["strength"]))
+            elif meta.get("conflicting_surprises"):
+                event_surprise = 0.0
+
+    active_count = long_count + short_count
 
     if active_count == 0:
         return {
@@ -57,13 +61,13 @@ def compute_composite(tier1_signals: list[dict], tier2_signals: list[dict]) -> d
             "event_surprise_magnitude": 0.0,
         }
 
-    # Determine primary direction
+    # Determine primary direction (average strength only among votes on the winning side)
     if long_score > short_score:
         direction = "long"
-        base_strength = long_score / active_count
+        base_strength = long_score / long_count if long_count else 0.0
     elif short_score > long_score:
         direction = "short"
-        base_strength = short_score / active_count
+        base_strength = short_score / short_count if short_count else 0.0
     else:
         direction = "flat"
         base_strength = 0.0

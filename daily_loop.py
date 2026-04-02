@@ -3,7 +3,8 @@
 Quant EOD Engine — Daily Loop Orchestrator
 
 Master script: data collection + prediction pipeline.
-Triggered by cron at 4:30 PM EST, Monday–Friday.
+Schedule cron at or after 5:15 PM America/New_York, Monday–Friday, so the
+daily Forex bar is typically complete (OANDA marks complete after the 5 PM ET fix).
 
 Pipeline steps:
   Phase 1 (Data Collection):
@@ -250,13 +251,26 @@ def main():
                ORDER BY bar_time ASC""",
             (PRIMARY_INSTRUMENT,),
         )
+        h4_rows = db_fetch_all(
+            """SELECT bar_time, open, high, low, close, volume
+               FROM bars WHERE instrument = %s AND granularity = 'H4' AND complete = TRUE
+               ORDER BY bar_time ASC""",
+            (PRIMARY_INSTRUMENT,),
+        )
         if bars_rows:
             for r in bars_rows:
                 for col in ['open', 'high', 'low', 'close']:
                     r[col] = float(r[col])
                 r['volume'] = int(r['volume'])
             bars_df = pd.DataFrame(bars_rows)
-            technical_result = compute_all_features(bars_df)
+            h4_df = None
+            if h4_rows:
+                for r in h4_rows:
+                    for col in ['open', 'high', 'low', 'close']:
+                        r[col] = float(r[col])
+                    r['volume'] = int(r['volume'])
+                h4_df = pd.DataFrame(h4_rows)
+            technical_result = compute_all_features(bars_df, h4_df)
             steps["technical"] = True
             logger.info(f"Technical: ATR={technical_result.get('atr_14')}, RSI={technical_result.get('rsi_14')}")
         else:

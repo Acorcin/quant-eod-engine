@@ -139,13 +139,14 @@ def detect_candle_patterns(df: pd.DataFrame) -> pd.DataFrame:
     }, index=df.index)
 
 
-def compute_all_features(daily_bars: pd.DataFrame) -> dict:
+def compute_all_features(daily_bars: pd.DataFrame, h4_bars: pd.DataFrame | None = None) -> dict:
     """
     Compute the full technical feature set from daily OHLCV bars.
 
     Args:
         daily_bars: DataFrame with columns [open, high, low, close, volume]
-                    sorted by bar_time ascending. At least 60 rows expected.
+            sorted by bar_time ascending. At least 60 rows expected.
+        h4_bars: Optional H4 bars DataFrame used for intraday context.
 
     Returns:
         Dict of feature name → value for the LATEST bar.
@@ -210,5 +211,20 @@ def compute_all_features(daily_bars: pd.DataFrame) -> dict:
         "volatility_5d": float(df["close"].pct_change().tail(5).std()) if len(df) >= 6 else None,
         "volatility_20d": float(df["close"].pct_change().tail(20).std()) if len(df) >= 21 else None,
     }
+
+    if h4_bars is not None and len(h4_bars) >= 2:
+        h4 = h4_bars.copy().sort_values("bar_time").reset_index(drop=True)
+        h4_ret = h4["close"].pct_change()
+        last_close = float(h4.iloc[-1]["close"])
+        prev_close = float(h4.iloc[-2]["close"])
+        h4_body = float(h4.iloc[-1]["close"] - h4.iloc[-1]["open"])
+        h4_target = h4_ret.tail(min(len(h4_ret), 6))
+        features.update({
+            "h4_return_last_pct": float((last_close / prev_close - 1.0) * 100.0) if prev_close else 0.0,
+            "h4_body_direction": 1 if h4_body > 0 else (-1 if h4_body < 0 else 0),
+            "h4_trend_6bars_pct": float((last_close / float(h4.iloc[-min(len(h4), 6)]["close"]) - 1.0) * 100.0)
+            if len(h4) >= 6 else None,
+            "h4_volatility_6bars": float(h4_target.std()) if len(h4_target) >= 2 else None,
+        })
 
     return features

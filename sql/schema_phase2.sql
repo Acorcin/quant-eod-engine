@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS model_runs (
     model_type      VARCHAR(30) NOT NULL,       -- xgboost, hmm
     model_version   VARCHAR(50) NOT NULL,
     training_samples INTEGER,
-    cpcv_results    JSONB,                      -- sharpe_mean, sharpe_std, deflated_sharpe, paths
+    cpcv_results    JSONB,                      -- sharpe_mean, sharpe_std, p-value, PSR, path stats
     shap_importance JSONB,                      -- ordered feature importance
     hyperparams     JSONB,
     metrics         JSONB,                      -- accuracy, precision, recall, f1
