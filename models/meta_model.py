@@ -23,6 +23,23 @@ import pandas as pd
 from datetime import date
 from itertools import combinations
 
+from scipy import stats
+from sklearn.preprocessing import StandardScaler
+try:
+    from utils.trading_calendar import next_trading_day
+except Exception as exc:  # pragma: no cover - defensive fallback
+    logger = logging.getLogger(__name__)
+    logger.warning("utils.trading_calendar import failed, using weekday fallback: %s", exc)
+
+    def next_trading_day(run_date: date) -> date:
+        """Fallback next-trading-day helper (weekends only)."""
+        from datetime import timedelta
+
+        candidate = run_date + timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
+
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = os.environ.get("MODEL_DIR", os.path.join(
@@ -51,20 +68,33 @@ class MetaModel:
 
     def __init__(self):
         self.model = None
+        self.scaler: StandardScaler | None = None
         self.model_version: str = ""
         self.cpcv_results: dict = {}
         self.shap_importance: list = []
 
-    def train(self, feature_vectors: list[dict], labels: list[int]) -> dict:
+    def train(
+        self,
+        feature_vectors: list[dict],
+        labels: list[int],
+        sample_dates: list[date] | None = None,
+        instrument: str | None = None,
+        allow_synthetic_return_proxy: bool = False,
+    ) -> dict:
         """
         Train the XGBoost model on historical feature vectors.
 
         Args:
             feature_vectors: List of feature dicts (26 features each).
             labels: Binary labels (1=profitable, 0=not).
+            sample_dates: One calendar date per row (same order as feature_vectors).
+                Required for CPCV to use realized next-day returns from `bars`.
+            instrument: e.g. EUR_USD; used with sample_dates to load bar returns.
+            allow_synthetic_return_proxy: Allow CPCV to fall back to fixed ±0.1% returns
+                when realized bar returns are unavailable. Defaults to False.
 
         Returns:
-            Training results dict with metrics and CPCV scores.
+            Training results dict with CPCV validation and clearly labeled in-sample fit.
         """
         import xgboost as xgb
         from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -76,14 +106,35 @@ class MetaModel:
             if col not in df.columns:
                 df[col] = 0.0
 
-        X = df[FEATURE_COLS].fillna(0).values
+        X_raw = df[FEATURE_COLS].fillna(0).values
         y = np.array(labels)
 
-        if len(X) < 50:
-            raise ValueError(f"Need at least 50 samples for training, got {len(X)}")
+        if len(X_raw) < 50:
+            raise ValueError(f"Need at least 50 samples for training, got {len(X_raw)}")
+
+        if sample_dates is not None and len(sample_dates) != len(feature_vectors):
+            raise ValueError("sample_dates must match feature_vectors length when provided")
+        if (sample_dates is None or not instrument) and not allow_synthetic_return_proxy:
+            raise ValueError(
+                "CPCV requires sample_dates + instrument for realized returns. "
+                "Pass allow_synthetic_return_proxy=True to use the simplified fallback."
+            )
+
+        self.scaler = StandardScaler()
+        X = self.scaler.fit_transform(X_raw)
 
         # CPCV validation
-        cpcv = self._run_cpcv(X, y, n_groups=6, k_test=2, purge=5, embargo=2)
+        cpcv = self._run_cpcv(
+            X_raw,
+            y,
+            n_groups=6,
+            k_test=2,
+            purge=5,
+            embargo=2,
+            sample_dates=sample_dates,
+            instrument=instrument,
+            allow_synthetic_return_proxy=allow_synthetic_return_proxy,
+        )
 
         # Train final model on all data
         self.model = xgb.XGBClassifier(
@@ -101,9 +152,9 @@ class MetaModel:
         )
         self.model.fit(X, y)
 
-        # Full-dataset metrics
+        # Full-dataset fit (optimistic — same data used to train and evaluate)
         y_pred = self.model.predict(X)
-        metrics = {
+        in_sample_train_metrics = {
             "accuracy": round(accuracy_score(y, y_pred), 4),
             "precision": round(precision_score(y, y_pred, zero_division=0), 4),
             "recall": round(recall_score(y, y_pred, zero_division=0), 4),
@@ -120,13 +171,13 @@ class MetaModel:
         self._save_model()
 
         logger.info(
-            f"Meta-model trained: {metrics}. "
-            f"CPCV deflated Sharpe: {cpcv.get('deflated_sharpe', 'N/A')}"
+            f"Meta-model trained (in-sample metrics for diagnostics only): {in_sample_train_metrics}. "
+            f"CPCV PSR: {cpcv.get('probabilistic_sharpe_ratio', 'N/A')}"
         )
 
         return {
             "model_version": self.model_version,
-            "metrics": metrics,
+            "in_sample_train_metrics": in_sample_train_metrics,
             "cpcv": cpcv,
             "top_features": self.shap_importance[:10],
         }
@@ -149,7 +200,9 @@ class MetaModel:
             return self._default_prediction(feature_vector)
 
         # Build feature array
-        X = np.array([[feature_vector.get(col, 0.0) for col in FEATURE_COLS]])
+        X = np.array([[feature_vector.get(col, 0.0) for col in FEATURE_COLS]], dtype=float)
+        if self.scaler is not None:
+            X = self.scaler.transform(X)
         prob = float(self.model.predict_proba(X)[0][1])
 
         # Position sizing from probability
@@ -181,9 +234,18 @@ class MetaModel:
         )
         return result
 
-    def _run_cpcv(self, X: np.ndarray, y: np.ndarray,
-                  n_groups: int = 6, k_test: int = 2,
-                  purge: int = 5, embargo: int = 2) -> dict:
+    def _run_cpcv(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        n_groups: int = 6,
+        k_test: int = 2,
+        purge: int = 5,
+        embargo: int = 2,
+        sample_dates: list[date] | None = None,
+        instrument: str | None = None,
+        allow_synthetic_return_proxy: bool = False,
+    ) -> dict:
         """
         Purged Combinatorial Cross-Validation.
 
@@ -194,6 +256,21 @@ class MetaModel:
         import xgboost as xgb
 
         n = len(X)
+        returns_all = None
+        if sample_dates is not None and instrument:
+            returns_all = _next_trading_day_pct_returns(instrument, sample_dates)
+            if returns_all is None or np.all(np.isnan(returns_all)):
+                returns_all = None
+        if returns_all is None and not allow_synthetic_return_proxy:
+            return {
+                "paths_tested": 0,
+                "error": (
+                    "Realized returns unavailable for CPCV. Provide sample_dates + instrument "
+                    "or enable allow_synthetic_return_proxy."
+                ),
+            }
+        if returns_all is None:
+            logger.warning("CPCV using fixed 0.1%% synthetic return proxy")
         group_size = n // n_groups
         groups = []
         for i in range(n_groups):
@@ -203,6 +280,7 @@ class MetaModel:
 
         test_combos = list(combinations(range(n_groups), k_test))
         path_returns = []
+        all_path_daily_returns: list[float] = []
 
         for combo in test_combos:
             test_idx = set()
@@ -221,8 +299,11 @@ class MetaModel:
             if len(train_idx) < 30 or len(test_idx) < 10:
                 continue
 
-            X_train, y_train = X[train_idx], y[train_idx]
-            X_test, y_test = X[test_idx], y[test_idx]
+            scaler = StandardScaler()
+            X_train_raw, y_train = X[train_idx], y[train_idx]
+            X_test_raw, y_test = X[test_idx], y[test_idx]
+            X_train = scaler.fit_transform(X_train_raw)
+            X_test = scaler.transform(X_test_raw)
 
             model = xgb.XGBClassifier(
                 n_estimators=100, max_depth=4, learning_rate=0.05,
@@ -235,8 +316,15 @@ class MetaModel:
             probs = model.predict_proba(X_test)[:, 1]
             # Simulate returns: if prob > 0.55, take the trade
             signals = (probs > 0.55).astype(float)
-            # Assume direction is correct when label=1
-            daily_returns = signals * (2 * y_test - 1) * 0.001  # simplified return proxy
+            if returns_all is not None:
+                r_next = returns_all[test_idx]
+                r_next = np.nan_to_num(r_next, nan=0.0)
+                # Same sign convention as the old proxy: label 1 → +|r|, 0 → −|r|
+                daily_returns = signals * (2 * y_test - 1) * np.abs(r_next)
+            else:
+                daily_returns = signals * (2 * y_test - 1) * 0.001
+
+            all_path_daily_returns.extend(daily_returns.tolist())
 
             if daily_returns.std() > 0:
                 sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
@@ -249,21 +337,36 @@ class MetaModel:
 
         sharpe_array = np.array(path_returns)
         sharpe_mean = float(sharpe_array.mean())
-        sharpe_std = float(sharpe_array.std()) if len(sharpe_array) > 1 else 1.0
+        sharpe_std = float(sharpe_array.std(ddof=1)) if len(sharpe_array) > 1 else 0.0
 
-        # Deflated Sharpe Ratio (simplified — adjusts for multiple testing)
-        # DSR = (SR_mean - SR_benchmark) / SE(SR)
-        # SR_benchmark ~ 0 for random strategy
         n_paths = len(sharpe_array)
-        se_sharpe = sharpe_std / np.sqrt(max(n_paths, 1))
-        deflated_sharpe = sharpe_mean / se_sharpe if se_sharpe > 0 else 0.0
+        if n_paths > 1 and sharpe_std > 1e-12:
+            t_res = stats.ttest_1samp(sharpe_array, 0.0, alternative="greater")
+            path_t_stat = float(t_res.statistic)
+            path_p_value = float(t_res.pvalue)
+            if not np.isfinite(path_p_value):
+                path_p_value = 1.0
+        else:
+            path_t_stat = 0.0
+            path_p_value = 1.0
+
+        # Bailey & López de Prado — Probabilistic Sharpe Ratio (skew/kurtosis of returns)
+        psr = None
+        if all_path_daily_returns and len(all_path_daily_returns) > 2:
+            r = np.array(all_path_daily_returns, dtype=float)
+            r = r[np.isfinite(r)]
+            if len(r) > 2 and np.std(r, ddof=1) > 0:
+                psr = _probabilistic_sharpe_ratio_from_returns(r)
 
         return {
             "paths_tested": n_paths,
             "sharpe_mean": round(sharpe_mean, 4),
             "sharpe_std": round(sharpe_std, 4),
-            "deflated_sharpe": round(deflated_sharpe, 4),
-            "statistically_significant": deflated_sharpe > 1.96,
+            "path_sharpe_t_statistic": round(path_t_stat, 4),
+            "path_sharpe_p_value": round(path_p_value, 6),
+            "probabilistic_sharpe_ratio": round(psr, 4) if psr is not None else None,
+            "uses_synthetic_returns": returns_all is None,
+            "statistically_significant": (path_p_value < 0.05) and (sharpe_mean > 0),
             "path_sharpes": [round(s, 4) for s in path_returns],
         }
 
@@ -303,7 +406,7 @@ class MetaModel:
         from models.database import get_connection
         import json
 
-        prediction_for = run_date  # In practice, next trading day
+        prediction_for = next_trading_day(run_date)
 
         conn = get_connection()
         try:
@@ -349,6 +452,7 @@ class MetaModel:
         with open(path, "wb") as f:
             pickle.dump({
                 "model": self.model,
+                "scaler": self.scaler,
                 "version": self.model_version,
                 "cpcv": self.cpcv_results,
                 "shap": self.shap_importance,
@@ -365,6 +469,7 @@ class MetaModel:
         with open(path, "rb") as f:
             data = pickle.load(f)
             self.model = data["model"]
+            self.scaler = data.get("scaler")
             self.model_version = data["version"]
             self.cpcv_results = data.get("cpcv", {})
             self.shap_importance = data.get("shap", [])
@@ -379,3 +484,72 @@ class MetaModel:
             "model_version": "no_model",
             "top_shap": [],
         }
+
+
+def _normalize_date(d):
+    if isinstance(d, date):
+        return d
+    if isinstance(d, str):
+        from datetime import datetime as dt
+
+        return dt.fromisoformat(d).date()
+    return d
+
+
+def _next_trading_day_pct_returns(instrument: str, sample_dates: list) -> np.ndarray | None:
+    """Close-to-close return from each bar date to the next trading session (OANDA daily)."""
+    from models.database import fetch_all
+
+    rows = fetch_all(
+        """SELECT bar_time::date AS d, close FROM bars
+           WHERE instrument = %s AND granularity = 'D' AND complete = TRUE
+           ORDER BY bar_time ASC""",
+        (instrument,),
+    )
+    if not rows:
+        return None
+    close_by_date = {r["d"]: float(r["close"]) for r in rows}
+    out = np.zeros(len(sample_dates))
+    for i, raw in enumerate(sample_dates):
+        d = _normalize_date(raw)
+        if d not in close_by_date:
+            out[i] = np.nan
+            continue
+        nd = next_trading_day(d)
+        guard = 0
+        while nd not in close_by_date and guard < 30:
+            nd = next_trading_day(nd)
+            guard += 1
+        if nd not in close_by_date:
+            out[i] = np.nan
+        else:
+            out[i] = (close_by_date[nd] / close_by_date[d]) - 1.0
+    return out
+
+
+def _probabilistic_sharpe_ratio_from_returns(returns: np.ndarray) -> float:
+    """
+    Bailey & López de Prado Probabilistic Sharpe Ratio (approx.),
+    using skewness and kurtosis of the return series (AFML Ch. 14).
+    """
+    r = np.asarray(returns, dtype=float)
+    r = r[np.isfinite(r)]
+    T = len(r)
+    if T < 3:
+        return 0.5
+    m = np.mean(r)
+    s = np.std(r, ddof=1)
+    if s <= 0:
+        return 0.5
+    sr = (m / s) * np.sqrt(252.0)
+    skew = float(stats.skew(r, bias=False))
+    kurt_excess = float(stats.kurtosis(r, fisher=True, bias=False))
+    var_sr = (
+        1.0
+        + 0.5 * sr ** 2
+        - skew * sr
+        + (kurt_excess / 4.0) * sr ** 2
+    ) / max(T - 1, 1)
+    var_sr = max(var_sr, 1e-12)
+    z = sr / np.sqrt(var_sr)
+    return float(stats.norm.cdf(z))

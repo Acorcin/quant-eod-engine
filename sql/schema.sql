@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS yield_data (
     date            DATE NOT NULL,
     us_2y_yield     NUMERIC(6, 4),               -- e.g. 3.8570
     de_2y_yield     NUMERIC(6, 4),               -- e.g. 2.6070
-    yield_spread_bps NUMERIC(8, 2),              -- e.g. 125.00
+    yield_spread_bps NUMERIC(8, 2),              -- e.g. 125.00 (US 2Y - DE 2Y, bps)
+    spread_change_5d_bps NUMERIC(8, 2),          -- change in spread vs ~5 obs ago
+    spread_change_20d_bps NUMERIC(8, 2),           -- change in spread vs ~20 obs ago
     source          VARCHAR(20) NOT NULL DEFAULT 'fred',
     fetched_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (date, source)

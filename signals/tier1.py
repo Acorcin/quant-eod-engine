@@ -12,6 +12,7 @@ directional signal (long/short/flat) with a strength score.
 import logging
 from datetime import date
 from models.database import fetch_one, fetch_all
+from config.settings import SENTIMENT_EXTREME_HIGH, SENTIMENT_EXTREME_LOW
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ YIELD_THRESHOLDS = {
     1: 15.0,  # high_vol_choppy: wider (need bigger moves to be meaningful)
     2: 20.0,  # high_vol_crash: widest (extreme noise)
 }
+SENTIMENT_STRENGTH_SPAN = 0.18  # preserve previous 72%/28% behavior shape
 
 
 def yield_spread_momentum(run_date: date, instrument: str, regime_state: int) -> dict:
@@ -39,7 +41,13 @@ def yield_spread_momentum(run_date: date, instrument: str, regime_state: int) ->
     if not macro:
         return _no_signal("yield_spread_momentum", "No macro data available")
 
-    spread_change_5d = float(macro.get("us_2y_change_5d_bps") or 0)
+    raw_spread = macro.get("spread_change_5d_bps")
+    us_only = macro.get("us_2y_change_5d_bps")
+    if raw_spread is None and us_only is None:
+        return _no_signal("yield_spread_momentum", "No spread or US 2Y 5d change data")
+    if raw_spread is None and us_only is not None:
+        logger.warning("yield_spread_momentum using US-only 5d change fallback")
+    spread_change_5d = float(raw_spread if raw_spread is not None else us_only)
     threshold = YIELD_THRESHOLDS.get(regime_state, 15.0)
 
     if spread_change_5d > threshold:
@@ -71,8 +79,8 @@ def sentiment_extreme_fade(run_date: date, instrument: str) -> dict:
     Retail Sentiment Extreme — Fade the Crowd.
 
     Logic:
-    - If retail > 72% long → SHORT (fade the longs)
-    - If retail < 28% long → LONG (fade the shorts)
+    - If retail > high threshold → SHORT (fade the longs)
+    - If retail < low threshold → LONG (fade the shorts)
     - Retail traders are demonstrably wrong at extremes
     """
     row = fetch_one(
@@ -84,19 +92,24 @@ def sentiment_extreme_fade(run_date: date, instrument: str) -> dict:
 
     pct_long = float(row.get("pct_long") or 0.5)
 
-    if pct_long > 0.72:
-        strength = min((pct_long - 0.72) / 0.18, 1.0)  # scales 0.72→0.90 to 0→1
+    high = SENTIMENT_EXTREME_HIGH
+    low = SENTIMENT_EXTREME_LOW
+    high_span = max(SENTIMENT_STRENGTH_SPAN, 1e-6)
+    low_span = max(SENTIMENT_STRENGTH_SPAN, 1e-6)
+
+    if pct_long > high:
+        strength = min((pct_long - high) / high_span, 1.0)
         return _signal(
             "sentiment_extreme_fade", "short", strength,
             f"Retail {pct_long*100:.1f}% long — extreme, fade longs",
-            {"pct_long": pct_long, "threshold_high": 0.72},
+            {"pct_long": pct_long, "threshold_high": high},
         )
-    elif pct_long < 0.28:
-        strength = min((0.28 - pct_long) / 0.18, 1.0)
+    elif pct_long < low:
+        strength = min((low - pct_long) / low_span, 1.0)
         return _signal(
             "sentiment_extreme_fade", "long", strength,
             f"Retail {pct_long*100:.1f}% long — extreme short positioning, fade shorts",
-            {"pct_long": pct_long, "threshold_low": 0.28},
+            {"pct_long": pct_long, "threshold_low": low},
         )
     else:
         return _signal(
@@ -183,20 +196,42 @@ def eod_event_reversal(run_date: date, instrument: str, technical: dict) -> dict
             {"triggered": False},
         )
 
-    # Check if any event had a surprise direction
-    surprise_direction = None
-    for event in events:
-        sd = event.get("surprise_direction", "")
-        if sd and sd != "neutral":
-            surprise_direction = sd
-            break
+    def _usd_surprise_score(sd: str) -> float:
+        if not sd or sd == "neutral":
+            return 0.0
+        if "positive_usd" in sd:
+            return 1.0
+        if "negative_usd" in sd:
+            return -1.0
+        return 0.0
 
-    if not surprise_direction:
+    surprise_scores = [_usd_surprise_score(str(e.get("surprise_direction") or "")) for e in events]
+    has_positive = any(score > 0 for score in surprise_scores)
+    has_negative = any(score < 0 for score in surprise_scores)
+    has_conflict = has_positive and has_negative
+    net_usd = float(sum(surprise_scores))
+    non_neutral = [e for e in events if (e.get("surprise_direction") or "") not in ("", "neutral")]
+
+    if not non_neutral:
         return _signal(
             "eod_event_reversal", "flat", 0.0,
-            "Events occurred but no clear surprise direction",
+            "Events occurred but no surprise_direction set",
             {"triggered": False, "events_count": len(events)},
         )
+
+    if net_usd == 0.0:
+        return _signal(
+            "eod_event_reversal", "flat", 0.0,
+            "High-impact events conflict (net USD surprise ≈ 0)",
+            {
+                "triggered": False,
+                "events_count": len(events),
+                "conflicting_surprises": True,
+                "per_event_scores": surprise_scores,
+            },
+        )
+
+    surprise_direction = "positive_usd" if net_usd > 0 else "negative_usd"
 
     body_dir = technical.get("body_direction", 0)
 
@@ -217,16 +252,30 @@ def eod_event_reversal(run_date: date, instrument: str, technical: dict) -> dict
         direction = "short"
 
     if reversal_detected:
+        strength = min(0.85 + 0.02 * (len(non_neutral) - 1), 1.0)
         return _signal(
-            "eod_event_reversal", direction, 0.85,
-            f"Event surprise '{surprise_direction}' but candle closed opposite → institutional reversal",
-            {"triggered": True, "surprise": surprise_direction, "candle_direction": body_dir},
+            "eod_event_reversal", direction, strength,
+            f"Aggregated USD surprise ({surprise_direction}) vs candle → institutional reversal",
+            {
+                "triggered": True,
+                "surprise": surprise_direction,
+                "net_usd_score": net_usd,
+                "conflicting_surprises": has_conflict,
+                "events_count": len(events),
+                "candle_direction": body_dir,
+            },
         )
     else:
         return _signal(
             "eod_event_reversal", "flat", 0.0,
-            f"Event surprise '{surprise_direction}' confirmed by candle — no reversal",
-            {"triggered": False, "surprise": surprise_direction, "candle_direction": body_dir},
+            f"Aggregated surprise '{surprise_direction}' aligned with candle — no reversal",
+            {
+                "triggered": False,
+                "surprise": surprise_direction,
+                "net_usd_score": net_usd,
+                "conflicting_surprises": has_conflict,
+                "candle_direction": body_dir,
+            },
         )
 
 

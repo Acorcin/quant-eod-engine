@@ -29,6 +29,9 @@ See [SETUP.md](SETUP.md) for full deployment instructions.
 # Quick start with Docker
 docker compose up -d postgres
 docker compose run --rm quant-engine
+
+# Historical backtest on stored feature vectors
+python backtest_loop.py --instrument EUR_USD --start 2025-01-01 --end 2025-12-31
 ```
 
 ## Roadmap

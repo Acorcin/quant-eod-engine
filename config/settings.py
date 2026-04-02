@@ -58,3 +58,8 @@ FRED_DE_2Y_SERIES = "DFII5"         # Proxy — will need adjustment (see note b
 # ─── Logging ──────────────────────────────────────────────
 LOG_DIR = os.environ.get("LOG_DIR", "/home/user/workspace/quant-eod-engine/logs")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
+# ─── Signal Calibration ───────────────────────────────────
+# Retail sentiment fade thresholds (fraction long, 0..1)
+SENTIMENT_EXTREME_HIGH = float(os.environ.get("SENTIMENT_EXTREME_HIGH", "0.72"))
+SENTIMENT_EXTREME_LOW = float(os.environ.get("SENTIMENT_EXTREME_LOW", "0.28"))
