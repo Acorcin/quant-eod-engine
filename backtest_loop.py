@@ -14,7 +14,19 @@ import numpy as np
 from config.settings import PRIMARY_INSTRUMENT
 from models.database import fetch_all
 from models.meta_model import MetaModel
-from utils.trading_calendar import next_trading_day
+try:
+    from utils.trading_calendar import next_trading_day
+except Exception as exc:  # pragma: no cover - defensive fallback
+    logger = logging.getLogger("backtest_loop")
+    logger.warning("utils.trading_calendar import failed, using weekday fallback: %s", exc)
+
+    def next_trading_day(run_date: date) -> date:
+        from datetime import timedelta
+
+        candidate = run_date + timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("backtest_loop")
@@ -73,9 +85,9 @@ def _annualized_sortino(returns: np.ndarray, periods_per_year: int = 252) -> flo
     if len(returns) < 2:
         return 0.0
     downside = returns[returns < 0]
-    if len(downside) < 1:
+    if len(downside) < 2:
         return 0.0
-    downside_std = float(np.std(downside, ddof=1)) if len(downside) > 1 else 0.0
+    downside_std = float(np.std(downside, ddof=1))
     if downside_std <= 1e-12:
         return 0.0
     return float(np.mean(returns) / downside_std * np.sqrt(periods_per_year))

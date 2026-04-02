@@ -61,6 +61,7 @@ def compute_composite(tier1_signals: list[dict], tier2_signals: list[dict]) -> d
             "event_surprise_magnitude": 0.0,
         }
 
+    tie_break = False
     # Determine primary direction (average strength only among votes on the winning side)
     if long_score > short_score:
         direction = "long"
@@ -69,6 +70,7 @@ def compute_composite(tier1_signals: list[dict], tier2_signals: list[dict]) -> d
         direction = "short"
         base_strength = short_score / short_count if short_count else 0.0
     else:
+        tie_break = True
         direction = "flat"
         base_strength = 0.0
 
@@ -82,7 +84,7 @@ def compute_composite(tier1_signals: list[dict], tier2_signals: list[dict]) -> d
         else:
             t2_adjustment -= 0.02
 
-    composite_strength = max(0.0, min(1.0, base_strength + t2_adjustment))
+    composite_strength = 0.0 if tie_break else max(0.0, min(1.0, base_strength + t2_adjustment))
 
     # If composite strength is too weak, go flat
     if composite_strength < 0.15:
@@ -99,6 +101,7 @@ def compute_composite(tier1_signals: list[dict], tier2_signals: list[dict]) -> d
         "tier2_count": tier2_count,
         "eod_event_reversal": eod_reversal,
         "event_surprise_magnitude": round(event_surprise, 4),
+        "tie_break": tie_break,
     }
 
     logger.info(

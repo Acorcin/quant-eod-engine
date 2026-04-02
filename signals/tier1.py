@@ -22,6 +22,7 @@ YIELD_THRESHOLDS = {
     1: 15.0,  # high_vol_choppy: wider (need bigger moves to be meaningful)
     2: 20.0,  # high_vol_crash: widest (extreme noise)
 }
+SENTIMENT_STRENGTH_SPAN = 0.18  # preserve previous 72%/28% behavior shape
 
 
 def yield_spread_momentum(run_date: date, instrument: str, regime_state: int) -> dict:
@@ -41,9 +42,12 @@ def yield_spread_momentum(run_date: date, instrument: str, regime_state: int) ->
         return _no_signal("yield_spread_momentum", "No macro data available")
 
     raw_spread = macro.get("spread_change_5d_bps")
-    spread_change_5d = float(
-        raw_spread if raw_spread is not None else (macro.get("us_2y_change_5d_bps") or 0)
-    )
+    us_only = macro.get("us_2y_change_5d_bps")
+    if raw_spread is None and us_only is None:
+        return _no_signal("yield_spread_momentum", "No spread or US 2Y 5d change data")
+    if raw_spread is None and us_only is not None:
+        logger.warning("yield_spread_momentum using US-only 5d change fallback")
+    spread_change_5d = float(raw_spread if raw_spread is not None else us_only)
     threshold = YIELD_THRESHOLDS.get(regime_state, 15.0)
 
     if spread_change_5d > threshold:
@@ -90,8 +94,8 @@ def sentiment_extreme_fade(run_date: date, instrument: str) -> dict:
 
     high = SENTIMENT_EXTREME_HIGH
     low = SENTIMENT_EXTREME_LOW
-    high_span = max(1.0 - high, 1e-6)
-    low_span = max(low, 1e-6)
+    high_span = max(SENTIMENT_STRENGTH_SPAN, 1e-6)
+    low_span = max(SENTIMENT_STRENGTH_SPAN, 1e-6)
 
     if pct_long > high:
         strength = min((pct_long - high) / high_span, 1.0)
@@ -202,6 +206,9 @@ def eod_event_reversal(run_date: date, instrument: str, technical: dict) -> dict
         return 0.0
 
     surprise_scores = [_usd_surprise_score(str(e.get("surprise_direction") or "")) for e in events]
+    has_positive = any(score > 0 for score in surprise_scores)
+    has_negative = any(score < 0 for score in surprise_scores)
+    has_conflict = has_positive and has_negative
     net_usd = float(sum(surprise_scores))
     non_neutral = [e for e in events if (e.get("surprise_direction") or "") not in ("", "neutral")]
 
@@ -253,6 +260,7 @@ def eod_event_reversal(run_date: date, instrument: str, technical: dict) -> dict
                 "triggered": True,
                 "surprise": surprise_direction,
                 "net_usd_score": net_usd,
+                "conflicting_surprises": has_conflict,
                 "events_count": len(events),
                 "candle_direction": body_dir,
             },
@@ -265,6 +273,7 @@ def eod_event_reversal(run_date: date, instrument: str, technical: dict) -> dict
                 "triggered": False,
                 "surprise": surprise_direction,
                 "net_usd_score": net_usd,
+                "conflicting_surprises": has_conflict,
                 "candle_direction": body_dir,
             },
         )

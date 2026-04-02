@@ -40,6 +40,14 @@ def assemble_feature_vector(
     """
     # Pull macro data from DB
     macro = _get_macro_data(run_date)
+    spread_5d = macro.get("spread_change_5d_bps")
+    spread_20d = macro.get("spread_change_20d_bps")
+    us_5d = macro.get("us_2y_change_5d_bps")
+    us_20d = macro.get("us_2y_change_20d_bps")
+    if spread_5d is None and us_5d is not None:
+        logger.warning("Feature vector using US-only 5d change fallback (spread_change_5d_bps missing)")
+    if spread_20d is None and us_20d is not None:
+        logger.warning("Feature vector using US-only 20d change fallback (spread_change_20d_bps missing)")
 
     # Pull AI sentiment from DB
     ai = _get_ai_sentiment(run_date)
@@ -57,16 +65,8 @@ def assemble_feature_vector(
 
         # ─── Macro (from FRED) ───
         "yield_spread_bps": macro.get("yield_spread_bps", 0.0),
-        "yield_spread_change_5d": float(
-            macro.get("spread_change_5d_bps")
-            if macro.get("spread_change_5d_bps") is not None
-            else (macro.get("us_2y_change_5d_bps") or 0.0)
-        ),
-        "yield_spread_change_20d": float(
-            macro.get("spread_change_20d_bps")
-            if macro.get("spread_change_20d_bps") is not None
-            else (macro.get("us_2y_change_20d_bps") or 0.0)
-        ),
+        "yield_spread_change_5d": float(spread_5d if spread_5d is not None else (us_5d or 0.0)),
+        "yield_spread_change_20d": float(spread_20d if spread_20d is not None else (us_20d or 0.0)),
 
         # ─── Sentiment (from OANDA) ───
         "sentiment_pct_long": sentiment.get("pct_long", 0.5),

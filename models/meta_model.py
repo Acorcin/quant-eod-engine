@@ -25,7 +25,20 @@ from itertools import combinations
 
 from scipy import stats
 from sklearn.preprocessing import StandardScaler
-from utils.trading_calendar import next_trading_day
+try:
+    from utils.trading_calendar import next_trading_day
+except Exception as exc:  # pragma: no cover - defensive fallback
+    logger = logging.getLogger(__name__)
+    logger.warning("utils.trading_calendar import failed, using weekday fallback: %s", exc)
+
+    def next_trading_day(run_date: date) -> date:
+        """Fallback next-trading-day helper (weekends only)."""
+        from datetime import timedelta
+
+        candidate = run_date + timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +79,7 @@ class MetaModel:
         labels: list[int],
         sample_dates: list[date] | None = None,
         instrument: str | None = None,
+        allow_synthetic_return_proxy: bool = False,
     ) -> dict:
         """
         Train the XGBoost model on historical feature vectors.
@@ -76,6 +90,8 @@ class MetaModel:
             sample_dates: One calendar date per row (same order as feature_vectors).
                 Required for CPCV to use realized next-day returns from `bars`.
             instrument: e.g. EUR_USD; used with sample_dates to load bar returns.
+            allow_synthetic_return_proxy: Allow CPCV to fall back to fixed ±0.1% returns
+                when realized bar returns are unavailable. Defaults to False.
 
         Returns:
             Training results dict with CPCV validation and clearly labeled in-sample fit.
@@ -98,6 +114,11 @@ class MetaModel:
 
         if sample_dates is not None and len(sample_dates) != len(feature_vectors):
             raise ValueError("sample_dates must match feature_vectors length when provided")
+        if (sample_dates is None or not instrument) and not allow_synthetic_return_proxy:
+            raise ValueError(
+                "CPCV requires sample_dates + instrument for realized returns. "
+                "Pass allow_synthetic_return_proxy=True to use the simplified fallback."
+            )
 
         self.scaler = StandardScaler()
         X = self.scaler.fit_transform(X_raw)
@@ -112,6 +133,7 @@ class MetaModel:
             embargo=2,
             sample_dates=sample_dates,
             instrument=instrument,
+            allow_synthetic_return_proxy=allow_synthetic_return_proxy,
         )
 
         # Train final model on all data
@@ -222,6 +244,7 @@ class MetaModel:
         embargo: int = 2,
         sample_dates: list[date] | None = None,
         instrument: str | None = None,
+        allow_synthetic_return_proxy: bool = False,
     ) -> dict:
         """
         Purged Combinatorial Cross-Validation.
@@ -237,10 +260,17 @@ class MetaModel:
         if sample_dates is not None and instrument:
             returns_all = _next_trading_day_pct_returns(instrument, sample_dates)
             if returns_all is None or np.all(np.isnan(returns_all)):
-                logger.warning(
-                    "CPCV: could not load next-day bar returns — using fixed 0.1%% proxy"
-                )
                 returns_all = None
+        if returns_all is None and not allow_synthetic_return_proxy:
+            return {
+                "paths_tested": 0,
+                "error": (
+                    "Realized returns unavailable for CPCV. Provide sample_dates + instrument "
+                    "or enable allow_synthetic_return_proxy."
+                ),
+            }
+        if returns_all is None:
+            logger.warning("CPCV using fixed 0.1%% synthetic return proxy")
         group_size = n // n_groups
         groups = []
         for i in range(n_groups):
@@ -250,7 +280,7 @@ class MetaModel:
 
         test_combos = list(combinations(range(n_groups), k_test))
         path_returns = []
-        last_path_daily_returns: np.ndarray | None = None
+        all_path_daily_returns: list[float] = []
 
         for combo in test_combos:
             test_idx = set()
@@ -294,7 +324,7 @@ class MetaModel:
             else:
                 daily_returns = signals * (2 * y_test - 1) * 0.001
 
-            last_path_daily_returns = daily_returns
+            all_path_daily_returns.extend(daily_returns.tolist())
 
             if daily_returns.std() > 0:
                 sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
@@ -322,8 +352,8 @@ class MetaModel:
 
         # Bailey & López de Prado — Probabilistic Sharpe Ratio (skew/kurtosis of returns)
         psr = None
-        if last_path_daily_returns is not None and len(last_path_daily_returns) > 2:
-            r = last_path_daily_returns.astype(float)
+        if all_path_daily_returns and len(all_path_daily_returns) > 2:
+            r = np.array(all_path_daily_returns, dtype=float)
             r = r[np.isfinite(r)]
             if len(r) > 2 and np.std(r, ddof=1) > 0:
                 psr = _probabilistic_sharpe_ratio_from_returns(r)
@@ -335,6 +365,7 @@ class MetaModel:
             "path_sharpe_t_statistic": round(path_t_stat, 4),
             "path_sharpe_p_value": round(path_p_value, 6),
             "probabilistic_sharpe_ratio": round(psr, 4) if psr is not None else None,
+            "uses_synthetic_returns": returns_all is None,
             "statistically_significant": (path_p_value < 0.05) and (sharpe_mean > 0),
             "path_sharpes": [round(s, 4) for s in path_returns],
         }
