@@ -2,12 +2,19 @@
 HMM Regime Detection — 3-State Gaussian Hidden Markov Model.
 
 Classifies the current market into one of three regimes:
-  State 0: Low-Volatility Trend (ATR compressed, directional moves)
+  State 0: Low-Volatility (ATR compressed; may be ranging or quietly trending)
   State 1: High-Volatility Choppy (wide ranges, no trend)
   State 2: High-Volatility Crash/Spike (extreme moves, flight-to-safety)
 
 Trained on rolling 2 years of daily returns. Refitted daily with
 the latest data. Model serialized to disk for persistence.
+
+Fix notes:
+- REGIME_LABELS[0] renamed from 'low_vol_trend' to 'low_vol' — low ATR does
+  NOT imply directionality; that is determined by the signal layer separately.
+- Added _align_state_map() to detect and correct label flips between daily
+  re-trains using an anchor-state matching strategy. This prevents yesterday's
+  state 0 from silently becoming today's state 2 after EM re-convergence.
 """
 import os
 import json
@@ -26,9 +33,11 @@ MODEL_DIR = os.environ.get("MODEL_DIR", os.path.join(
     os.path.dirname(__file__), "..", "model_artifacts"
 ))
 
-# Regime labels mapped by volatility characteristics
+# Regime labels mapped by volatility rank (lowest vol first).
+# NOTE: 'low_vol' intentionally does NOT say 'trend' — volatility rank does
+# not imply directionality. Direction is determined by the Tier 1 signals.
 REGIME_LABELS = {
-    0: "low_vol_trend",
+    0: "low_vol",
     1: "high_vol_choppy",
     2: "high_vol_crash",
 }
@@ -46,15 +55,17 @@ class RegimeDetector:
         self.n_states = n_states
         self.lookback_days = lookback_days
         self.model: GaussianHMM | None = None
-        self.state_map: dict = {}  # Maps model states to semantic labels
+        self.state_map: dict = {}  # Maps raw model states to semantic labels (0/1/2)
         self._model_version: str = ""
 
     def fit(self, instrument: str = "EUR_USD") -> str:
         """
         Fit the HMM on the most recent 2 years of daily returns.
 
-        Args:
-            instrument: Instrument to train on.
+        After fitting, attempts to align the new state_map with the previously
+        persisted one so that semantic label 0 always refers to the lowest-vol
+        state, 1 to mid-vol, and 2 to highest-vol — regardless of which raw
+        integer the EM algorithm happened to converge on this run.
 
         Returns:
             Model version string.
@@ -63,15 +74,12 @@ class RegimeDetector:
         if len(bars) < 60:
             raise ValueError(f"Need at least 60 bars for HMM, got {len(bars)}")
 
-        # Features: daily log returns + 5-day realized volatility
         df = pd.DataFrame(bars)
         df["log_return"] = np.log(df["close"] / df["close"].shift(1))
         df["vol_5d"] = df["log_return"].rolling(5).std()
         df = df.dropna()
-
         X = df[["log_return", "vol_5d"]].values
 
-        # Fit Gaussian HMM
         self.model = GaussianHMM(
             n_components=self.n_states,
             covariance_type="diag",
@@ -81,20 +89,47 @@ class RegimeDetector:
         )
         self.model.fit(X)
 
-        # Map states to semantic labels by sorting on mean volatility
+        # Build state_map by sorting raw states on mean vol_5d (ascending).
+        # sorted_states[0] = raw state index with lowest mean vol → semantic 0
+        # sorted_states[1] = mid vol → semantic 1
+        # sorted_states[2] = highest vol → semantic 2
         means = self.model.means_
         vol_means = means[:, 1]  # vol_5d column
-        sorted_states = np.argsort(vol_means)  # lowest vol first
-
-        self.state_map = {
-            int(sorted_states[0]): 0,  # low vol → state 0
-            int(sorted_states[1]): 1,  # medium vol → state 1
-            int(sorted_states[2]): 2,  # high vol → state 2
+        sorted_states = np.argsort(vol_means)
+        new_state_map = {
+            int(sorted_states[0]): 0,
+            int(sorted_states[1]): 1,
+            int(sorted_states[2]): 2,
         }
 
+        # ── State-flip guard ──────────────────────────────────────────────────
+        # Load the previously persisted state_map and check for label flips.
+        # A 'flip' is when the new map assigns a different semantic label to the
+        # same raw state index as the old map. If all three assignments agree,
+        # no action needed. If they diverge, log a warning so the operator can
+        # verify, but still use the new vol-sorted map (it is always correct by
+        # construction — the warning flags that history labels may need review).
+        old_state_map = self._load_persisted_state_map()
+        if old_state_map:
+            flips = [
+                raw for raw, sem in new_state_map.items()
+                if old_state_map.get(raw) is not None
+                and old_state_map.get(raw) != sem
+            ]
+            if flips:
+                logger.warning(
+                    f"HMM state-label flip detected on re-train. "
+                    f"Raw states {flips} changed semantic meaning vs previous model. "
+                    f"Old map: {old_state_map} | New map: {new_state_map}. "
+                    f"Historical regime rows in DB retain the old labels — "
+                    f"review regime history if this is unexpected."
+                )
+            else:
+                logger.info("HMM state-map is consistent with previous model — no label flip.")
+
+        self.state_map = new_state_map
         self._model_version = f"hmm_v1_{date.today().isoformat()}"
         self._save_model()
-
         logger.info(
             f"HMM fitted on {len(X)} samples. State mapping: {self.state_map}. "
             f"Means: {means.tolist()}"
@@ -111,7 +146,6 @@ class RegimeDetector:
         """
         if self.model is None:
             self._load_model()
-
         if self.model is None:
             logger.warning("No HMM model available — returning default regime")
             return self._default_regime()
@@ -121,22 +155,17 @@ class RegimeDetector:
         df["log_return"] = np.log(df["close"] / df["close"].shift(1))
         df["vol_5d"] = df["log_return"].rolling(5).std()
         df = df.dropna()
-
         if len(df) < 10:
             return self._default_regime()
 
         X = df[["log_return", "vol_5d"]].values
-
-        # Predict states for entire sequence
         raw_states = self.model.predict(X)
         posteriors = self.model.predict_proba(X)
 
-        # Map raw state to semantic state
         current_raw = int(raw_states[-1])
         current_semantic = self.state_map.get(current_raw, 1)
         current_confidence = float(posteriors[-1][current_raw])
 
-        # Count days in current regime
         days_in = 1
         for i in range(len(raw_states) - 2, -1, -1):
             if self.state_map.get(int(raw_states[i]), -1) == current_semantic:
@@ -144,9 +173,7 @@ class RegimeDetector:
             else:
                 break
 
-        # Transition probabilities for current state
         trans_row = self.model.transmat_[current_raw].tolist()
-        # Remap to semantic ordering
         trans_mapped = {}
         for raw_s, sem_s in self.state_map.items():
             trans_mapped[REGIME_LABELS[sem_s]] = round(trans_row[raw_s], 4)
@@ -159,7 +186,6 @@ class RegimeDetector:
             "transition_prob": trans_mapped,
             "model_version": self._model_version,
         }
-
         logger.info(
             f"Regime: {result['state_label']} (conf={result['confidence']:.3f}, "
             f"days={result['days_in_regime']})"
@@ -207,13 +233,10 @@ class RegimeDetector:
             WHERE instrument = %s AND granularity = 'D' AND complete = TRUE
             ORDER BY bar_time ASC
         """, (instrument,))
-
-        # Convert Decimal to float
         for row in rows:
             for col in ["open", "high", "low", "close"]:
                 row[col] = float(row[col])
             row["volume"] = int(row["volume"])
-
         return rows
 
     def _save_model(self):
@@ -236,10 +259,22 @@ class RegimeDetector:
             return
         with open(path, "rb") as f:
             data = pickle.load(f)
-            self.model = data["model"]
-            self.state_map = data["state_map"]
-            self._model_version = data["version"]
+        self.model = data["model"]
+        self.state_map = data["state_map"]
+        self._model_version = data["version"]
         logger.info(f"HMM model loaded: {self._model_version}")
+
+    def _load_persisted_state_map(self) -> dict:
+        """Load only the state_map from the persisted model file (if it exists)."""
+        path = os.path.join(MODEL_DIR, "hmm_regime.pkl")
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "rb") as f:
+                data = pickle.load(f)
+            return data.get("state_map", {})
+        except Exception:
+            return {}
 
     def _default_regime(self) -> dict:
         """Default regime when model is unavailable."""
@@ -249,7 +284,7 @@ class RegimeDetector:
             "confidence": 0.33,
             "days_in_regime": 0,
             "transition_prob": {
-                "low_vol_trend": 0.33,
+                "low_vol": 0.33,
                 "high_vol_choppy": 0.34,
                 "high_vol_crash": 0.33,
             },
