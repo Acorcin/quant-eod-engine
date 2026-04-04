@@ -178,7 +178,7 @@ def run_backtest(instrument: str, start: date | None, end: date | None, initial_
                 "direction": direction,
                 "probability": pred.get("probability"),
                 "size": size,
-                "daily_return": round(ret, 6),
+                "daily_return": round(raw_ret, 6),
                 "strategy_pnl": round(pnl, 6),
                 "equity": round(equity, 2),
             }
