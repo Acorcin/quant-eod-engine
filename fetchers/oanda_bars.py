@@ -13,11 +13,6 @@ from models.database import get_connection
 
 logger = logging.getLogger(__name__)
 
-HEADERS = {
-    "Authorization": f"Bearer {OANDA_API_TOKEN}",
-    "Content-Type": "application/json",
-}
-
 
 def fetch_candles(instrument: str, granularity: str, count: int) -> list[dict]:
     """
@@ -38,8 +33,13 @@ def fetch_candles(instrument: str, granularity: str, count: int) -> list[dict]:
         "price": "M",  # mid prices
         # dailyAlignment defaults to 17 (5 PM EST) — no override needed
     }
+    
+    headers = {
+        "Authorization": f"Bearer {OANDA_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
-    response = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    response = requests.get(url, headers=headers, params=params, timeout=30)
     response.raise_for_status()
     data = response.json()
 
@@ -105,8 +105,8 @@ def fetch_and_store_all():
     results = {}
     for instrument in INSTRUMENTS:
         try:
-            # Daily bars — 60 days for indicator calculation (MA-50 needs 50+)
-            daily = fetch_candles(instrument, "D", 60)
+            # Daily bars — 210 days for indicator calculation (MA-200 needs 200+)
+            daily = fetch_candles(instrument, "D", 210)
             store_candles(daily)
             results[f"{instrument}_D"] = len(daily)
 

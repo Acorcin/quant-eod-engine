@@ -47,16 +47,16 @@ PRIMARY_INSTRUMENT = "EUR_USD"
 
 # ─── FRED Series IDs ─────────────────────────────────────
 FRED_US_2Y_SERIES = "DGS2"          # US 2-Year Treasury yield
-FRED_DE_2Y_SERIES = "DFII5"         # Proxy — will need adjustment (see note below)
+FRED_DE_2Y_SERIES = "IRLTLT01DEM156N" # Proxy — using Long-Term Interest Rate for Germany instead of missing 2Y
 # Note: FRED does not carry German 2Y directly. Options:
-#   1. Use "IRLTLT01DEM156N" (long-term) as proxy
+#   1. Use "IRLTLT01DEM156N" (long-term) as proxy (Current)
 #   2. Use ECB Statistical Data Warehouse API
 #   3. Use Trading Economics API
 #   4. Hardcode a manual feed initially
 # For MVP, we'll use what FRED has and document the gap.
 
 # ─── Logging ──────────────────────────────────────────────
-LOG_DIR = os.environ.get("LOG_DIR", "/home/user/workspace/quant-eod-engine/logs")
+LOG_DIR = os.environ.get("LOG_DIR", os.path.join(os.path.dirname(__file__), "..", "logs"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 
 # ─── Signal Calibration ───────────────────────────────────

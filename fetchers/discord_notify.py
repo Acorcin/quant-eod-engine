@@ -130,7 +130,7 @@ def _build_embed(snapshot: dict, status: str) -> dict:
 
     # Regime emoji
     regime_icons = {
-        "low_vol_trend": "\U0001f4c8",
+        "low_vol": "\U0001f4c8",
         "high_vol_choppy": "\U0001f300",
         "high_vol_crash": "\u26a1",
     }
