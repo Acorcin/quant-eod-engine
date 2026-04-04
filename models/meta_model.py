@@ -16,8 +16,8 @@ Validation: Purged Combinatorial Cross-Validation (CPCV)
 """
 import os
 import json
-import pickle
 import logging
+import joblib
 import numpy as np
 import pandas as pd
 from datetime import date
@@ -174,6 +174,29 @@ class MetaModel:
             f"Meta-model trained (in-sample metrics for diagnostics only): {in_sample_train_metrics}. "
             f"CPCV PSR: {cpcv.get('probabilistic_sharpe_ratio', 'N/A')}"
         )
+
+        from models.database import get_connection
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO model_runs (
+                        run_date, model_type, model_version, training_samples,
+                        cpcv_results, shap_importance, metrics, model_path
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    date.today(), "xgboost_meta", self.model_version, len(X),
+                    json.dumps(cpcv), json.dumps(self.shap_importance),
+                    json.dumps(in_sample_train_metrics), os.path.join(MODEL_DIR, "meta_model_xgb.json")
+                ))
+            conn.commit()
+            logger.info("Successfully recorded training run in model_runs table")
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to record model_run to DB: {e}")
+        finally:
+            conn.close()
 
         return {
             "model_version": self.model_version,
@@ -448,31 +471,39 @@ class MetaModel:
     def _save_model(self):
         """Serialize model to disk."""
         os.makedirs(MODEL_DIR, exist_ok=True)
-        path = os.path.join(MODEL_DIR, "meta_model.pkl")
-        with open(path, "wb") as f:
-            pickle.dump({
-                "model": self.model,
-                "scaler": self.scaler,
-                "version": self.model_version,
-                "cpcv": self.cpcv_results,
-                "shap": self.shap_importance,
-                "feature_cols": FEATURE_COLS,
-            }, f)
-        logger.info(f"Meta-model saved to {path}")
+        # XGB native format
+        xgb_path = os.path.join(MODEL_DIR, "meta_model_xgb.json")
+        self.model.save_model(xgb_path)
+        
+        # Metadata via joblib
+        path = os.path.join(MODEL_DIR, "meta_model.joblib")
+        joblib.dump({
+            "scaler": self.scaler,
+            "version": self.model_version,
+            "cpcv": self.cpcv_results,
+            "shap": self.shap_importance,
+            "feature_cols": FEATURE_COLS,
+        }, path)
+        logger.info(f"Meta-model saved to {path} and {xgb_path}")
 
     def _load_model(self):
         """Load model from disk."""
-        path = os.path.join(MODEL_DIR, "meta_model.pkl")
-        if not os.path.exists(path):
+        import xgboost as xgb
+
+        xgb_path = os.path.join(MODEL_DIR, "meta_model_xgb.json")
+        path = os.path.join(MODEL_DIR, "meta_model.joblib")
+        if not os.path.exists(path) or not os.path.exists(xgb_path):
             logger.warning(f"No meta-model at {path}")
             return
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-            self.model = data["model"]
-            self.scaler = data.get("scaler")
-            self.model_version = data["version"]
-            self.cpcv_results = data.get("cpcv", {})
-            self.shap_importance = data.get("shap", [])
+            
+        self.model = xgb.XGBClassifier()
+        self.model.load_model(xgb_path)
+        
+        data = joblib.load(path)
+        self.scaler = data.get("scaler")
+        self.model_version = data["version"]
+        self.cpcv_results = data.get("cpcv", {})
+        self.shap_importance = data.get("shap", [])
         logger.info(f"Meta-model loaded: {self.model_version}")
 
     def _default_prediction(self, feature_vector: dict) -> dict:

@@ -18,7 +18,7 @@ Fix notes:
 """
 import os
 import json
-import pickle
+import joblib
 import logging
 import numpy as np
 import pandas as pd
@@ -242,23 +242,21 @@ class RegimeDetector:
     def _save_model(self):
         """Serialize model to disk."""
         os.makedirs(MODEL_DIR, exist_ok=True)
-        path = os.path.join(MODEL_DIR, "hmm_regime.pkl")
-        with open(path, "wb") as f:
-            pickle.dump({
-                "model": self.model,
-                "state_map": self.state_map,
-                "version": self._model_version,
-            }, f)
+        path = os.path.join(MODEL_DIR, "hmm_regime.joblib")
+        joblib.dump({
+            "model": self.model,
+            "state_map": self.state_map,
+            "version": self._model_version,
+        }, path)
         logger.info(f"HMM model saved to {path}")
 
     def _load_model(self):
         """Load model from disk."""
-        path = os.path.join(MODEL_DIR, "hmm_regime.pkl")
+        path = os.path.join(MODEL_DIR, "hmm_regime.joblib")
         if not os.path.exists(path):
             logger.warning(f"No HMM model file at {path}")
             return
-        with open(path, "rb") as f:
-            data = pickle.load(f)
+        data = joblib.load(path)
         self.model = data["model"]
         self.state_map = data["state_map"]
         self._model_version = data["version"]
@@ -266,12 +264,11 @@ class RegimeDetector:
 
     def _load_persisted_state_map(self) -> dict:
         """Load only the state_map from the persisted model file (if it exists)."""
-        path = os.path.join(MODEL_DIR, "hmm_regime.pkl")
+        path = os.path.join(MODEL_DIR, "hmm_regime.joblib")
         if not os.path.exists(path):
             return {}
         try:
-            with open(path, "rb") as f:
-                data = pickle.load(f)
+            data = joblib.load(path)
             return data.get("state_map", {})
         except Exception:
             return {}

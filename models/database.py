@@ -53,6 +53,9 @@ def fetch_all(query: str, params: tuple = None) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
             return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"DB fetch_all error executing {query[:50]}... : {e}", exc_info=True)
+        raise
     finally:
         conn.close()
 
@@ -65,6 +68,9 @@ def fetch_one(query: str, params: tuple = None) -> dict | None:
             cur.execute(query, params)
             row = cur.fetchone()
             return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"DB fetch_one error executing {query[:50]}... : {e}", exc_info=True)
+        raise
     finally:
         conn.close()
 

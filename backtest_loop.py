@@ -38,26 +38,26 @@ def _parse_date(value: str | None) -> date | None:
     return datetime.fromisoformat(value).date()
 
 
-def _load_close_map(instrument: str) -> dict[date, float]:
+def _load_price_map(instrument: str) -> dict[date, dict]:
     rows = fetch_all(
-        """SELECT bar_time::date AS d, close
+        """SELECT bar_time::date AS d, open, close
            FROM bars
            WHERE instrument = %s AND granularity = 'D' AND complete = TRUE
            ORDER BY bar_time ASC""",
         (instrument,),
     )
-    return {r["d"]: float(r["close"]) for r in rows}
+    return {r["d"]: {"open": float(r["open"]), "close": float(r["close"])} for r in rows}
 
 
-def _resolve_next_close(close_map: dict[date, float], d: date) -> tuple[date | None, float | None]:
+def _resolve_next_price(price_map: dict[date, dict], d: date) -> tuple[date | None, dict | None]:
     nd = next_trading_day(d)
     guard = 0
-    while nd not in close_map and guard < 30:
+    while nd not in price_map and guard < 30:
         nd = next_trading_day(nd)
         guard += 1
-    if nd not in close_map:
+    if nd not in price_map:
         return None, None
-    return nd, close_map[nd]
+    return nd, price_map[nd]
 
 
 def _max_drawdown(equity_curve: list[float]) -> float:
@@ -113,7 +113,7 @@ def run_backtest(instrument: str, start: date | None, end: date | None, initial_
     if not fv_rows:
         return {"error": "No feature_vectors rows found for selection"}
 
-    close_map = _load_close_map(instrument)
+    price_map = _load_price_map(instrument)
     model = MetaModel()
 
     equity = initial_equity
@@ -125,25 +125,37 @@ def run_backtest(instrument: str, start: date | None, end: date | None, initial_
     turnover = 0.0
     position_sizes: list[float] = []
     pnl_series: list[float] = []
+    
+    # Realistic Forex friction parameters
+    LEVERAGE = 10.0
+    SPREAD_BPS = 1.5  # 1.5 pips spread assumed
+    spread_cost_mult = SPREAD_BPS / 10000.0
 
     for row in fv_rows:
         d = row["date"]
         features = row["features"] or {}
         pred = model.predict(features)
 
-        d_close = close_map.get(d)
-        nd, nd_close = _resolve_next_close(close_map, d)
-        if d_close is None or nd is None or nd_close is None:
+        nd, prices_nd = _resolve_next_price(price_map, d)
+        if nd is None or prices_nd is None:
             continue
 
-        ret = (nd_close / d_close) - 1.0
+        # Real Execution logic: 
+        # Feature vector is computed after day T closes.
+        # We enter at the Open of T+1, exit at the Close of T+1.
+        entry_price = prices_nd["open"]
+        exit_price = prices_nd["close"]
+        
+        raw_ret = (exit_price / entry_price) - 1.0
+        
         direction = pred["direction"]
         size = float(pred.get("size_multiplier", 0.0) or 0.0)
 
+        # Apply direction, leverage, and subtract transaction costs (spread is paid on entry and exit equivalent)
         if direction == "long":
-            pnl = size * ret
+            pnl = size * LEVERAGE * (raw_ret - spread_cost_mult)
         elif direction == "short":
-            pnl = size * (-ret)
+            pnl = size * LEVERAGE * (-raw_ret - spread_cost_mult)
         else:
             pnl = 0.0
 
